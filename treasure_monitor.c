@@ -2,176 +2,186 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <dirent.h>
 #include <signal.h>
 #include <sys/types.h>
-#include <sys/wait.h>
-#include <dirent.h>  
+#include <sys/stat.h>
+#include <linux/limits.h>
 
-void list_hunts() 
-{
-    DIR *dir = opendir(".");  
-    if (dir == NULL) 
-    {
-        perror("Nu am putut deschide directorul");
+#define COMMAND_FILE "monitor_command.txt"
+#define USERNAME_SIZE 32
+#define CLUE_SIZE 128
+
+// structura care reprezinta o comoara
+typedef struct {
+    int treasure_id;
+    char username[USERNAME_SIZE];
+    float latitude;
+    float longitude;
+    char clue[CLUE_SIZE];
+    int value;
+} Treasure;
+
+// variabile globale care controleaza comportamentul monitorului
+volatile sig_atomic_t should_terminate = 0;  // semnal pentru terminare
+volatile sig_atomic_t got_command = 0;       // semnal ca a fost primita o comanda
+
+// handler pentru semnalul SIGUSR1 - marcheaza ca a fost primita o comanda
+void handle_sigusr1(int sig) {
+    got_command = 1;
+}
+
+// handler pentru semnalul SIGTERM - marcheaza ca monitorul trebuie sa se opreasca
+void handle_sigterm(int sig) {
+    should_terminate = 1;
+}
+
+// afiseaza toate vanatorile disponibile si numarul de comori din fiecare
+void list_hunts() {
+    DIR *dir = opendir(".");
+    if (!dir) {
+        perror("Nu am putut deschide directorul curent");
         return;
     }
 
     struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL) 
-    {
-        // verificam daca intrarea este un subdirector si nu "." sau ".."
-        if (entry->d_type == DT_DIR && strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0) 
-        {
-            printf("Vanatoare: %s\n", entry->d_name);
+    while ((entry = readdir(dir)) != NULL) {
+        // verifica daca este director si are fisier treasures.dat
+        if (entry->d_type == DT_DIR &&
+            strcmp(entry->d_name, ".") != 0 &&
+            strcmp(entry->d_name, "..") != 0) {
+            char treasure_path[PATH_MAX];
+            snprintf(treasure_path, sizeof(treasure_path), "%s/treasures.dat", entry->d_name);
+            if (access(treasure_path, F_OK) == 0) {
+                int count = 0;
+                int fd = open(treasure_path, O_RDONLY);
+                if (fd >= 0) {
+                    Treasure t;
+                    // numara toate comorile din fisier
+                    while (read(fd, &t, sizeof(Treasure)) == sizeof(Treasure)) {
+                        count++;
+                    }
+                    close(fd);
+                }
+                printf("Vanatoare: %s | Comori: %d\n", entry->d_name, count);
+            }
         }
     }
-
-    closedir(dir); 
+    closedir(dir);
+    fflush(stdout);  // fortam afisarea in stdout
 }
 
-void list_treasures(const char *hunt_name) 
-{
-    char path[256];
-    snprintf(path, sizeof(path), "%s/treasures.dat", hunt_name);
-    
-    FILE *file = fopen(path, "r");
-    if (file == NULL) 
-    {
+// afiseaza toate comorile dintr-o vanatoare
+void list_treasures(const char *hunt_id) {
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/treasures.dat", hunt_id);
+
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
         perror("Nu am putut deschide fisierul de comori");
         return;
     }
 
-    char treasure_name[256];
-    while (fgets(treasure_name, sizeof(treasure_name), file)) 
-    {
-        printf("Comora: %s", treasure_name);
+    Treasure t;
+    // citeste si afiseaza fiecare comoara
+    while (read(fd, &t, sizeof(Treasure)) == sizeof(Treasure)) {
+        printf("ID: %d | Utilizator: %s | Lat: %.2f | Long: %.2f | Valoare: %d\n",
+               t.treasure_id, t.username, t.latitude, t.longitude, t.value);
     }
-
-    fclose(file);
+    close(fd);
+    fflush(stdout);
 }
 
-void view_treasure(const char *hunt_name, const char *treasure_name) 
-{
-    char path[256];
-    snprintf(path, sizeof(path), "%s/treasures.dat", hunt_name);
-    
-    FILE *file = fopen(path, "r");
-    if (file == NULL) 
-    {
+// afiseaza detaliile unei comori specifice dupa id
+void view_treasure(const char *hunt_id, int id) {
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/treasures.dat", hunt_id);
+
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
         perror("Nu am putut deschide fisierul de comori");
+        return;
+    }
+
+    Treasure t;
+    int found = 0;
+    // cauta comoara cu id-ul dat
+    while (read(fd, &t, sizeof(Treasure)) == sizeof(Treasure)) {
+        if (t.treasure_id == id) {
+            printf("ID: %d\nUtilizator: %s\nLatitudine: %.2f\nLongitudine: %.2f\nIndiciu: %s\nValoare: %d\n",
+                   t.treasure_id, t.username, t.latitude, t.longitude, t.clue, t.value);
+            found = 1;
+            break;
+        }
+    }
+    if (!found) {
+        printf("Comoara cu ID %d nu a fost gasita.\n", id);
+    }
+    close(fd);
+    fflush(stdout);
+}
+
+// citeste comanda din fisier si o executa
+void process_command() {
+    FILE *fp = fopen(COMMAND_FILE, "r");
+    if (!fp) {
+        perror("Nu pot citi comanda");
         return;
     }
 
     char line[256];
-    while (fgets(line, sizeof(line), file)) 
-    {
-        if (strstr(line, treasure_name)) 
-        {
-            printf("Detalii comora: %s", line);
-        }
+    if (!fgets(line, sizeof(line), fp)) {
+        fclose(fp);
+        return;
     }
+    fclose(fp);
 
-    fclose(file);
-}
+    // sparge linia in comanda si argumente
+    char *cmd = strtok(line, " \n");
+    if (!cmd) return;
 
-void start_monitor() 
-{
-    pid_t pid = fork();
-    if (pid == 0) 
-    {
-        // procesul copil va actiona ca monitor
-        while (1) 
-        {
-            sleep(1);  // asteaptya un semnal pentru a răspunde
-        }
-        exit(0);  
-    } else if (pid > 0) 
-    {
-        // procesul parinte va returna imediat
-        printf("Monitorul a fost pornit.\n");
-    } else 
-    {
-        perror("Eroare la fork()");
+    // executa comanda primita
+    if (strcmp(cmd, "list_hunts") == 0) {
+        list_hunts();
+    } else if (strcmp(cmd, "list_treasures") == 0) {
+        char *hunt_id = strtok(NULL, " \n");
+        if (hunt_id) list_treasures(hunt_id);
+    } else if (strcmp(cmd, "view_treasure") == 0) {
+        char *hunt_id = strtok(NULL, " \n");
+        char *id_str = strtok(NULL, " \n");
+        if (hunt_id && id_str) view_treasure(hunt_id, atoi(id_str));
     }
 }
 
-void stop_monitor(pid_t monitor_pid) 
-{
-    if (monitor_pid > 0) 
-    {
-        kill(monitor_pid, SIGTERM);  // trimit semnalul pentru a opri monitorul
-        waitpid(monitor_pid, NULL, 0);  // astept terminarea monitorului
-        printf("Monitorul a fost oprit.\n");
-    } else 
-    {
-        printf("Monitorul nu rulează.\n");
-    }
-}
+// programul principal - asteapta semnale si executa comenzi
+int main() {
+    struct sigaction sa_usr1, sa_term;
+    sigemptyset(&sa_usr1.sa_mask);
+    sigemptyset(&sa_term.sa_mask);
 
-int main()
- {
-    pid_t monitor_pid = -1;
+    sa_usr1.sa_handler = handle_sigusr1;
+    sa_usr1.sa_flags = SA_RESTART;
 
-    while (1) 
-    {
-        printf("\nComenzi disponibile:\n");
-        printf("start_monitor - Porneste monitorul\n");
-        printf("list_hunts - Listeaza vanatoarele\n");
-        printf("list_treasures <hunt_name> - Listeaza comorile dintr-o vanatoare\n");
-        printf("view_treasure <hunt_name> <treasure_name> - Vezi detalii despre o comoara\n");
-        printf("stop_monitor - Opreste monitorul\n");
-        printf("exit - Iese din program\n");
-        
-        char command[256];
-        fgets(command, sizeof(command), stdin);
-        command[strcspn(command, "\n")] = '\0';  // sterge caracterul '\n' de la final
+    sa_term.sa_handler = handle_sigterm;
+    sa_term.sa_flags = SA_RESTART;
 
-        if (strncmp(command, "start_monitor", 13) == 0) 
-        {
-            if (monitor_pid == -1) {
+    // seteaza handlerii pentru semnalele asteptate
+    sigaction(SIGUSR1, &sa_usr1, NULL);
+    sigaction(SIGTERM, &sa_term, NULL);
 
-                start_monitor();
-                monitor_pid = getpid();  // salveaza PID-ul monitorului
-            } else {
-                printf("Monitorul este deja pornit.\n");
-            }
-        } else if (strncmp(command, "list_hunts", 11) == 0) 
-        {
-            list_hunts();
-        } else if (strncmp(command, "list_treasures", 14) == 0) 
-        {
-            char hunt_name[256];
-            sscanf(command + 15, "%s", hunt_name);  // extrag numele vanatorii
-            list_treasures(hunt_name);
-        } else if (strncmp(command, "view_treasure", 13) == 0) 
-        {
-            char hunt_name[256], treasure_name[256];
-            sscanf(command + 14, "%s %s", hunt_name, treasure_name);  // extrag numele vanatorii si al comorii
-            view_treasure(hunt_name, treasure_name);
-        } else if (strncmp(command, "stop_monitor", 12) == 0) 
-        {
-            if (monitor_pid != -1) 
-            {
-                stop_monitor(monitor_pid);
-                monitor_pid = -1;
-            } else 
-            {
-                printf("Monitorul nu este pornit.\n");
-            }
-        } else if (strncmp(command, "exit", 4) == 0) 
-        {
-            if (monitor_pid != -1) 
-            {
-                printf("Monitorul ruleaza inca. Opriti-l mai intai.\n");
-            } else 
-            {
-                break;  // iese din program
-            }
-        } else 
-        {
-            printf("Comanda invalida. Incercati din nou.\n");
+    // bucla principala care asteapta comenzi prin semnal
+    while (!should_terminate) {
+        pause();  // asteapta semnal
+        if (got_command) {
+            got_command = 0;
+            process_command();  // executa comanda primita
         }
     }
 
+    // dupa terminare, se mai afiseaza un mesaj de confirmare
+    usleep(300000);
+    printf("[monitor] Oprire monitor finalizata.\n");
+    fflush(stdout);
     return 0;
 }
